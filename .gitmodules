@@ -1,0 +1,3 @@
+[submodule "openevolve-example-lunarlander"]
+	path = openevolve-example-lunarlander
+	url = https://github.com/NeapolitanIcecream/openevolve-example-lunarlander.git
