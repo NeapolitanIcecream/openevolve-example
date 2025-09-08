@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -20,12 +21,12 @@ def _load_agent_class(agent_repo_dir: Path):
     return getattr(module, "Agent")
 
 
-def visualize(agent_repo_dir: Path, episodes: int, max_steps: int, render_mode: str, seed: Optional[int]) -> None:
+def visualize(agent_repo_dir: Path, episodes: int, max_steps: int, render_mode: str, seed: Optional[int], config: Optional[Dict[str, Any]] = None) -> None:
     import gymnasium as gym
 
     env = gym.make("LunarLander-v3", render_mode=render_mode)
     Agent = _load_agent_class(agent_repo_dir)
-    agent = Agent(env.action_space, getattr(env, "observation_space", None), config=None)
+    agent = Agent(env.action_space, getattr(env, "observation_space", None), config=config)
 
     try:
         for ep in range(episodes):
@@ -68,10 +69,23 @@ def main():
     parser.add_argument("--max-steps", type=int, default=1000, help="Max steps per episode")
     parser.add_argument("--render-mode", type=str, default="human", choices=["human", "rgb_array"], help="Render mode for Gym environment")
     parser.add_argument("--seed", type=int, default=42, help="Base seed (episode i uses seed+i)")
+    parser.add_argument("--config", type=str, default=None, help="Path to JSON config for Agent (e.g., best_config.json)")
     args = parser.parse_args()
 
     agent_repo_dir = Path(args.agent_path).resolve()
-    visualize(agent_repo_dir, episodes=args.episodes, max_steps=args.max_steps, render_mode=args.render_mode, seed=args.seed)
+
+    cfg: Optional[Dict[str, Any]] = None
+    if args.config:
+        cfg_path = Path(args.config).resolve()
+        if not cfg_path.exists():
+            raise FileNotFoundError(f"Config JSON not found: {cfg_path}")
+        with open(cfg_path, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("Config JSON must be an object mapping param -> value")
+        cfg = data
+
+    visualize(agent_repo_dir, episodes=args.episodes, max_steps=args.max_steps, render_mode=args.render_mode, seed=args.seed, config=cfg)
 
 
 if __name__ == "__main__":
