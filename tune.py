@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Callable
 
 import importlib.util
-import threading
 
 
 # -------------------------
@@ -66,26 +66,6 @@ def _load_agent_class(agent_repo_dir: Path):
     return getattr(module, "Agent")
 
 
-# Map threads to stable worker indices to offset seeds per parallel job
-_worker_map_lock = threading.Lock()
-_thread_to_worker_index: Dict[int, int] = {}
-_next_worker_index = 0
-
-
-def _get_worker_index(n_jobs: int) -> int:
-    try:
-        tid = threading.get_ident()
-        global _next_worker_index
-        with _worker_map_lock:
-            if tid not in _thread_to_worker_index:
-                _thread_to_worker_index[tid] = _next_worker_index
-                _next_worker_index += 1
-            idx = _thread_to_worker_index[tid]
-            return idx % max(1, int(n_jobs)) if n_jobs else idx
-    except Exception:
-        return 0
-
-
 # -------------------------
 # Objective callable
 # -------------------------
@@ -99,14 +79,21 @@ class Objective:
     env_id: str
     overrides: Optional[Dict[str, Any]]
     space: Optional[Dict[str, Any]]
-    n_jobs: int
+    agent_cls: Optional[Any] = None
+
+    def __post_init__(self) -> None:
+        self.agent_cls = _load_agent_class(self.agent_repo_dir)
 
     def __call__(self, trial):  # type: ignore[override]
         import gymnasium as gym
         import optuna
 
+        trial_number = getattr(trial, "number", 0)
+        trial_seed_stride = 100000
+        trial_seed_base = (self.seed or 0) + trial_number * trial_seed_stride
+
         env = gym.make(self.env_id)
-        Agent = _load_agent_class(self.agent_repo_dir)
+        Agent = self.agent_cls if self.agent_cls is not None else _load_agent_class(self.agent_repo_dir)
         agent = None
         try:
             # Build agent using trial-suggested config
@@ -160,13 +147,12 @@ class Objective:
                     # Last resort: plain agent with no tuning
                     agent = Agent(env.action_space, getattr(env, "observation_space", None), config=None)
 
-            # Compute worker-dependent seed base to avoid duplication across parallel jobs
-            worker_index = _get_worker_index(self.n_jobs)
-            base_seed = (self.seed or 0) + (worker_index * self.episodes)
-
             episode_rewards = []
             for i in range(self.episodes):
-                s = base_seed + i if self.seed is not None else None
+                if self.seed is not None:
+                    s = trial_seed_base + i
+                else:
+                    s = None
                 try:
                     obs, _info = env.reset(seed=s)
                 except TypeError:
@@ -364,6 +350,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Optuna tuning frontend for LunarLander Agent")
     default_agent_dir = Path(__file__).parent / "openevolve-example-lunarlander"
+    default_cpu = os.cpu_count() or 1
 
     parser.add_argument("--agent-path", type=str, default=str(default_agent_dir), help="Path to agent repository directory (must contain agent.py)")
     parser.add_argument("--n-trials", type=int, default=50, help="Number of Optuna trials")
@@ -374,7 +361,7 @@ def main():
     parser.add_argument("--seed", type=int, default=int(env_defaults.get("seed", 42)), help="Base seed (episode i uses seed+i)")
     parser.add_argument("--env-id", type=str, default=str(env_defaults.get("env_id", "LunarLander-v3")), help="Gymnasium environment id")
 
-    parser.add_argument("--n-jobs", type=int, default=1, help="Parallel jobs for Optuna (>=1)")
+    parser.add_argument("--n-jobs", type=int, default=int(default_cpu), help="Parallel jobs for Optuna (>=1, <= CPU cores)")
     parser.add_argument("--sampler", type=str, default="tpe", choices=["tpe", "random", "cmaes"], help="Sampler algorithm")
     parser.add_argument("--pruner", type=str, default="median", choices=["none", "median", "asha"], help="Pruning strategy")
 
@@ -390,6 +377,9 @@ def main():
     parser.add_argument("--save-plots", type=str, default=None, help="Directory to save optimization plots (optional)")
 
     args = parser.parse_args()
+
+    cpu_count = os.cpu_count() or 1
+    n_jobs = max(1, min(int(args.n_jobs), int(cpu_count)))
 
     agent_repo_dir = Path(args.agent_path).resolve()
     space = _load_space_json(args.space_json)
@@ -417,11 +407,10 @@ def main():
         env_id=str(args.env_id),
         overrides=overrides,
         space=space,
-        n_jobs=int(args.n_jobs),
     )
 
     t0 = time.time()
-    study.optimize(objective, n_trials=int(args.n_trials), timeout=args.timeout, n_jobs=int(args.n_jobs), gc_after_trial=True, show_progress_bar=False)
+    study.optimize(objective, n_trials=int(args.n_trials), timeout=args.timeout, n_jobs=n_jobs, gc_after_trial=True, show_progress_bar=False)
     elapsed = time.time() - t0
 
     best = study.best_trial
